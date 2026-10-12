@@ -1,0 +1,11 @@
+../Drivers/CMSIS/Include/core_cm4.h:1679:22:__NVIC_EnableIRQ	16	static,ignoring_inline_asm
+../Drivers/CMSIS/Include/core_cm4.h:1770:22:__NVIC_ClearPendingIRQ	16	static
+../Drivers/CMSIS/Include/core_cm4.h:1809:22:__NVIC_SetPriority	16	static
+../Core/Src/output.c:11:13:disarm	4	static,ignoring_inline_asm
+../Core/Src/output.c:20:6:output_stop	8	static
+../Core/Src/output.c:28:6:output_init	8	static
+../Core/Src/output.c:56:6:output_start	16	static,ignoring_inline_asm
+../Core/Src/output.c:88:6:output_running	4	static
+../Core/Src/output.c:89:10:output_take_fault	24	static,ignoring_inline_asm
+../Core/Src/output.c:98:6:DMA1_Channel1_IRQHandler	8	static
+../Core/Src/output.c:103:6:TIM6_DAC_IRQHandler	8	static

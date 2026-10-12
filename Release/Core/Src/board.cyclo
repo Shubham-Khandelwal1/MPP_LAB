@@ -1,0 +1,4 @@
+../Core/Src/board.c:5:6:board_wait	3
+../Core/Src/board.c:15:6:board_delay_us	2
+../Core/Src/board.c:22:6:board_init	6
+../Core/Src/board.c:68:6:board_uses_hse	1

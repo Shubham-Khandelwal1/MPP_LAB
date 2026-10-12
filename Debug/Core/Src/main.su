@@ -1,0 +1,4 @@
+../Core/Src/main.c:9:13:print_status	8	static
+../Core/Src/main.c:22:13:print_help	8	static
+../Core/Src/main.c:38:13:execute	64	static
+../Core/Src/main.c:69:5:main	120	static,ignoring_inline_asm

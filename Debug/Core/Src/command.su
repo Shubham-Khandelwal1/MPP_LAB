@@ -1,0 +1,3 @@
+../Core/Src/command.c:4:13:parse_millihz	32	static
+../Core/Src/command.c:26:13:parse_percent	24	static
+../Core/Src/command.c:38:11:command_parse	80	static

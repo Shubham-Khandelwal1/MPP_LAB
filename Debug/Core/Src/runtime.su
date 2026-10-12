@@ -1,0 +1,2 @@
+../Core/Src/runtime.c:4:6:_init	4	static
+../Core/Src/runtime.c:5:6:_fini	4	static

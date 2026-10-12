@@ -1,0 +1,7 @@
+../Core/Src/uart.c:10:6:uart_init	1
+../Core/Src/uart.c:33:6:LPUART1_IRQHandler	5
+../Core/Src/uart.c:52:5:uart_getc	3
+../Core/Src/uart.c:69:6:uart_putc	2
+../Core/Src/uart.c:74:6:uart_puts	2
+../Core/Src/uart.c:75:6:uart_uint	3
+../Core/Src/uart.c:82:6:uart_millihz	1

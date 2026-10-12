@@ -1,0 +1,4 @@
+../Core/Src/board.c:5:6:board_wait	20	static
+../Core/Src/board.c:15:6:board_delay_us	8	static,ignoring_inline_asm
+../Core/Src/board.c:22:6:board_init	16	static,ignoring_inline_asm
+../Core/Src/board.c:68:6:board_uses_hse	0	static

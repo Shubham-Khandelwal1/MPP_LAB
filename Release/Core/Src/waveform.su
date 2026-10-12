@@ -1,0 +1,3 @@
+../Core/Src/waveform.c:4:6:wave_timing	56	static
+../Core/Src/waveform.c:43:6:wave_fill	56	static
+../Core/Src/waveform.c:73:13:wave_name	0	static
