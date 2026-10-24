@@ -158,7 +158,7 @@ command_t command_parse(char *line, const wave_config_t *current)
     if (!strcmp(args[0], "amp")) {
         if (argc == 2U && parse_percent(args[1], &result.config.amplitude_percent)) {
             result.kind = COMMAND_AMPLITUDE;
-        } else { result.error = "Use amp <0..100 integer percent of VREF+ peak-to-peak>."; }
+        } else { result.error = "Use amp <0..100 integer percent of VREF+ peak above zero>."; }
         return result;
     }
     if (!strcmp(args[0], "freq")) {

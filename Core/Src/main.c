@@ -1,6 +1,7 @@
 #include "main.h"
 #include "uart.h"
 #include "waveform.h"
+#include <string.h>
 
 /* Board clock and short waits stay with the application entry point. */
 static bool uses_hse;
@@ -147,15 +148,17 @@ static bool pot_init(void)
     GPIOB->PUPDR &= ~GPIO_PUPDR_PUPD0;
     /* Synchronous HCLK/4 keeps the ADC clock within its limit at 144 MHz. */
     ADC12_COMMON->CCR = (ADC12_COMMON->CCR & ~(ADC_CCR_CKMODE | ADC_CCR_PRESC)) |
-                        ADC_CCR_CKMODE_0 | ADC_CCR_CKMODE_1;
+                        ADC_CCR_CKMODE_0 | ADC_CCR_CKMODE_1 | ADC_CCR_VREFEN;
     ADC1->CR &= ~ADC_CR_DEEPPWD;
     ADC1->CR |= ADC_CR_ADVREGEN;
     board_delay_us(20U);
     ADC1->CFGR = 0U; /* One software-triggered, right-aligned 12-bit conversion. */
     ADC1->SQR1 = ADC_SQR1_SQ1_0;
     ADC1->SMPR1 = (ADC1->SMPR1 & ~ADC_SMPR1_SMP1) | ADC_SMPR1_SMP1;
-    ADC1->SMPR2 = (ADC1->SMPR2 & ~ADC_SMPR2_SMP15) | ADC_SMPR2_SMP15;
-    ADC1->DIFSEL &= ~((1U << 1) | (1U << 15)); /* Both channels are single-ended. */
+    ADC1->SMPR2 = (ADC1->SMPR2 & ~(ADC_SMPR2_SMP15 | ADC_SMPR2_SMP18)) |
+                  ADC_SMPR2_SMP15 | ADC_SMPR2_SMP18;
+    ADC1->DIFSEL &= ~((1U << 1) | (1U << 15) | (1U << 18));
+    /* ADC1 channel 18 measures VREFINT for the OLED's voltage estimate. */
     ADC1->CR &= ~ADC_CR_ADCALDIF;
     ADC1->CR |= ADC_CR_ADCAL;
     if (!board_wait(&ADC1->CR, ADC_CR_ADCAL, 0U, 10000U)) { return false; }
@@ -184,6 +187,296 @@ static bool pot_read(uint32_t channel, uint16_t *code)
 static bool manual_controls_read(uint16_t *frequency_code, uint16_t *amplitude_code)
 {
     return pot_read(1U, frequency_code) && pot_read(15U, amplitude_code);
+}
+
+/* GM009605 v4.3: 128x64 SSD1306-compatible OLED on I2C1 PB8/PB9. */
+#define OLED_WIDTH 128U
+#define OLED_REFRESH_US 10000U
+#define OLED_REFERENCE_US 500000U
+static bool oled_ready;
+static uint8_t oled_address, oled_drawn_pages, oled_next_page;
+static uint32_t oled_refresh_cycles, oled_reference_cycles, oled_reference_mv;
+static uint32_t oled_shown_frequency, oled_shown_peak_centivolts;
+static uint32_t oled_shown_amp_ref_centivolts, oled_shown_ref_centivolts;
+static wave_shape_t oled_shown_shape;
+static bool oled_shown_running;
+static control_mode_t oled_shown_mode;
+
+static bool oled_wait_i2c(uint32_t flag)
+{
+    const uint32_t start = DWT->CYCCNT;
+    const uint32_t timeout = (SystemCoreClock / 1000000U) * 2000U;
+    for (;;) {
+        const uint32_t status = I2C1->ISR;
+        if (status & (I2C_ISR_NACKF | I2C_ISR_BERR | I2C_ISR_ARLO)) { return false; }
+        if (status & flag) { return true; }
+        if ((uint32_t)(DWT->CYCCNT - start) >= timeout) { return false; }
+    }
+}
+
+static bool oled_write(uint8_t control, const uint8_t *bytes, uint16_t count)
+{
+    if (!board_wait(&I2C1->ISR, I2C_ISR_BUSY, 0U, 2000U)) { return false; }
+    I2C1->ICR = I2C_ICR_NACKCF | I2C_ICR_STOPCF | I2C_ICR_BERRCF | I2C_ICR_ARLOCF;
+    I2C1->CR2 = ((uint32_t)oled_address << 1) |
+                ((uint32_t)(count + 1U) << I2C_CR2_NBYTES_Pos) |
+                I2C_CR2_AUTOEND | I2C_CR2_START;
+    if (!oled_wait_i2c(I2C_ISR_TXIS)) { goto failed; }
+    I2C1->TXDR = control; /* 0x00 selects commands; 0x40 selects pixels. */
+    for (uint16_t i = 0U; i < count; ++i) {
+        if (!oled_wait_i2c(I2C_ISR_TXIS)) { goto failed; }
+        I2C1->TXDR = bytes[i];
+    }
+    if (!oled_wait_i2c(I2C_ISR_STOPF)) { goto failed; }
+    I2C1->ICR = I2C_ICR_STOPCF;
+    return true;
+
+failed:
+    I2C1->CR2 |= I2C_CR2_STOP;
+    (void)board_wait(&I2C1->ISR, I2C_ISR_STOPF, I2C_ISR_STOPF, 2000U);
+    I2C1->ICR = I2C_ICR_NACKCF | I2C_ICR_STOPCF | I2C_ICR_BERRCF | I2C_ICR_ARLOCF;
+    return false;
+}
+
+static bool oled_page(uint8_t page, const uint8_t pixels[OLED_WIDTH])
+{
+    const uint8_t position[] = {(uint8_t)(0xB0U | page), 0x00U, 0x10U};
+    return oled_write(0x00U, position, sizeof(position)) &&
+           oled_write(0x40U, pixels, OLED_WIDTH);
+}
+
+static bool oled_init(void)
+{
+    RCC->CR |= RCC_CR_HSION;
+    if (!board_wait(&RCC->CR, RCC_CR_HSIRDY, RCC_CR_HSIRDY, 1000U)) { return false; }
+    RCC->AHB2ENR |= RCC_AHB2ENR_GPIOBEN;
+    RCC->APB1ENR1 |= RCC_APB1ENR1_I2C1EN;
+    (void)RCC->APB1ENR1;
+    GPIOB->MODER = (GPIOB->MODER & ~((3U << 16) | (3U << 18))) |
+                   (2U << 16) | (2U << 18);
+    GPIOB->AFR[1] = (GPIOB->AFR[1] & ~0xFFU) | 0x44U; /* PB8/9: I2C1 AF4. */
+    GPIOB->OTYPER |= (1U << 8) | (1U << 9); /* I2C needs open-drain outputs. */
+    GPIOB->OSPEEDR |= (3U << 16) | (3U << 18);
+    GPIOB->PUPDR = (GPIOB->PUPDR & ~((3U << 16) | (3U << 18))) |
+                   (1U << 16) | (1U << 18);
+    I2C1->CR1 = 0U;
+    RCC->CCIPR = (RCC->CCIPR & ~RCC_CCIPR_I2C1SEL) | RCC_CCIPR_I2C1SEL_1;
+    /* HSI16, ~93 kHz standard-mode I2C: PRESC=1, SCLDEL=4,
+       SDADEL=2, SCLH=38, SCLL=45. No HAL or LL clock helpers. */
+    I2C1->TIMINGR = 0x1042262DU;
+    I2C1->CR1 = I2C_CR1_PE;
+    board_delay_us(20000U); /* Allow the OLED's charge pump supply to settle. */
+
+    static const uint8_t setup[] = {
+        0xAE, 0xD5, 0x80, 0xA8, 0x3F, 0xD3, 0x00, 0x40,
+        0x8D, 0x14, 0x20, 0x02, 0xA1, 0xC8, 0xDA, 0x12,
+        0x81, 0x7F, 0xD9, 0xF1, 0xDB, 0x40, 0xA4, 0xA6
+    };
+    oled_address = 0x3CU;
+    if (!oled_write(0x00U, setup, sizeof(setup))) {
+        oled_address = 0x3DU;
+        if (!oled_write(0x00U, setup, sizeof(setup))) { return false; }
+    }
+    const uint8_t blank[OLED_WIDTH] = {0U};
+    for (uint8_t page = 0U; page < 8U; ++page) {
+        if (!oled_page(page, blank)) { return false; }
+    }
+    const uint8_t on = 0xAFU;
+    if (!oled_write(0x00U, &on, 1U)) { return false; }
+    oled_refresh_cycles = DWT->CYCCNT -
+                          (SystemCoreClock / 1000000U) * OLED_REFRESH_US;
+    oled_reference_cycles = DWT->CYCCNT -
+                            (SystemCoreClock / 1000000U) * OLED_REFERENCE_US;
+    return true;
+}
+
+/* Only the glyphs used by the status screen are stored in flash. Each byte
+   describes one 7-pixel-high column, with the least significant bit at top. */
+static const uint8_t oled_font['Z' - ' ' + 1][5] = {
+    ['-' - ' '] = {0x08, 0x08, 0x08, 0x08, 0x08},
+    ['.' - ' '] = {0x00, 0x60, 0x60, 0x00, 0x00},
+    ['0' - ' '] = {0x3E, 0x51, 0x49, 0x45, 0x3E},
+    ['1' - ' '] = {0x00, 0x42, 0x7F, 0x40, 0x00},
+    ['2' - ' '] = {0x42, 0x61, 0x51, 0x49, 0x46},
+    ['3' - ' '] = {0x21, 0x41, 0x45, 0x4B, 0x31},
+    ['4' - ' '] = {0x18, 0x14, 0x12, 0x7F, 0x10},
+    ['5' - ' '] = {0x27, 0x45, 0x45, 0x45, 0x39},
+    ['6' - ' '] = {0x3C, 0x4A, 0x49, 0x49, 0x30},
+    ['7' - ' '] = {0x01, 0x71, 0x09, 0x05, 0x03},
+    ['8' - ' '] = {0x36, 0x49, 0x49, 0x49, 0x36},
+    ['9' - ' '] = {0x06, 0x49, 0x49, 0x29, 0x1E},
+    ['A' - ' '] = {0x7E, 0x11, 0x11, 0x11, 0x7E},
+    ['D' - ' '] = {0x7F, 0x41, 0x41, 0x22, 0x1C},
+    ['E' - ' '] = {0x7F, 0x49, 0x49, 0x49, 0x41},
+    ['F' - ' '] = {0x7F, 0x09, 0x09, 0x09, 0x01},
+    ['G' - ' '] = {0x3E, 0x41, 0x49, 0x49, 0x7A},
+    ['H' - ' '] = {0x7F, 0x08, 0x08, 0x08, 0x7F},
+    ['I' - ' '] = {0x00, 0x41, 0x7F, 0x41, 0x00},
+    ['L' - ' '] = {0x7F, 0x40, 0x40, 0x40, 0x40},
+    ['M' - ' '] = {0x7F, 0x02, 0x0C, 0x02, 0x7F},
+    ['N' - ' '] = {0x7F, 0x04, 0x08, 0x10, 0x7F},
+    ['O' - ' '] = {0x3E, 0x41, 0x41, 0x41, 0x3E},
+    ['P' - ' '] = {0x7F, 0x09, 0x09, 0x09, 0x06},
+    ['Q' - ' '] = {0x3E, 0x41, 0x51, 0x21, 0x5E},
+    ['R' - ' '] = {0x7F, 0x09, 0x19, 0x29, 0x46},
+    ['S' - ' '] = {0x46, 0x49, 0x49, 0x49, 0x31},
+    ['T' - ' '] = {0x01, 0x01, 0x7F, 0x01, 0x01},
+    ['U' - ' '] = {0x3F, 0x40, 0x40, 0x40, 0x3F},
+    ['V' - ' '] = {0x1F, 0x20, 0x40, 0x20, 0x1F},
+    ['W' - ' '] = {0x3F, 0x40, 0x38, 0x40, 0x3F},
+    ['Z' - ' '] = {0x61, 0x51, 0x49, 0x45, 0x43}
+};
+
+static bool oled_text(uint8_t page, const char *line)
+{
+    uint8_t pixels[OLED_WIDTH] = {0U};
+    uint32_t x = 0U;
+    while (*line && x + 5U < OLED_WIDTH) {
+        const unsigned character = (unsigned char)*line++;
+        if (character >= ' ' && character <= 'Z') {
+            memcpy(&pixels[x], oled_font[character - ' '], 5U);
+        }
+        x += 6U;
+    }
+    return oled_page(page, pixels);
+}
+
+static char *oled_append(char *out, const char *text)
+{
+    while (*text) { *out++ = *text++; }
+    return out;
+}
+
+static char *oled_decimal(char *out, uint32_t value)
+{
+    char reversed[10];
+    unsigned count = 0U;
+    do { reversed[count++] = (char)('0' + value % 10U); value /= 10U; } while (value);
+    while (count) { *out++ = reversed[--count]; }
+    return out;
+}
+
+static char *oled_volts(char *out, uint32_t centivolts)
+{
+    out = oled_decimal(out, centivolts / 100U);
+    *out++ = '.';
+    *out++ = (char)('0' + (centivolts / 10U) % 10U);
+    *out++ = (char)('0' + centivolts % 10U);
+    return out;
+}
+
+static const char *oled_shape(wave_shape_t shape)
+{
+    switch (shape) {
+    case WAVE_SINE: return "SINE";
+    case WAVE_SQUARE: return "SQUARE";
+    case WAVE_TRIANGLE: return "TRIANGLE";
+    case WAVE_SAW_UP: return "SAW UP";
+    case WAVE_SAW_DOWN: return "SAW DOWN";
+    default: return "WAVE";
+    }
+}
+
+static uint32_t oled_measure_reference(void)
+{
+    uint16_t raw;
+    if (!pot_ready || !pot_read(18U, &raw) || raw == 0U) { return 0U; }
+    /* Factory VREFINT calibration was taken at VREF+=3000 mV. Measuring
+       the same bandgap against the board's reference reveals its voltage. */
+    const uint32_t calibration = *(const uint16_t *)0x1FFF75AAUL;
+    if (calibration < 1000U || calibration > 2200U) { return 0U; }
+    const uint32_t millivolts = (3000U * calibration + raw / 2U) / raw;
+    return (millivolts >= 1800U && millivolts <= 3600U) ? millivolts : 0U;
+}
+
+static bool oled_render(uint32_t peak_centivolts, uint32_t ref_centivolts,
+                        bool running)
+{
+    char line[24];
+    char *p;
+    /* Transfer at most one 128-byte page per loop pass. This bounds the
+       button and potentiometer polling delay on the 100 kHz I2C bus. */
+    for (uint8_t offset = 0U; offset < 4U; ++offset) {
+        const uint8_t row = (uint8_t)((oled_next_page + offset) & 3U);
+        const bool missing = (oled_drawn_pages & (1U << row)) == 0U;
+        switch (row) {
+        case 0U:
+            if (!missing && config.shape == oled_shown_shape &&
+                running == oled_shown_running) { continue; }
+            p = oled_append(line, oled_shape(config.shape));
+            p = oled_append(p, running ? " RUN" : " STOP");
+            *p = '\0';
+            break;
+        case 1U:
+            if (!missing && timing.actual_millihz == oled_shown_frequency) { continue; }
+            p = oled_append(line, "FREQ ");
+            p = oled_decimal(p, timing.actual_millihz / 1000U);
+            *p++ = '.';
+            const uint32_t fraction = timing.actual_millihz % 1000U;
+            *p++ = (char)('0' + fraction / 100U);
+            *p++ = (char)('0' + (fraction / 10U) % 10U);
+            *p++ = (char)('0' + fraction % 10U);
+            p = oled_append(p, " HZ");
+            *p = '\0';
+            break;
+        case 2U:
+            if (!missing && peak_centivolts == oled_shown_peak_centivolts &&
+                ref_centivolts == oled_shown_amp_ref_centivolts) { continue; }
+            p = oled_append(line, "AMP 0-");
+            p = oled_reference_mv ? oled_volts(p, peak_centivolts) : oled_append(p, "--.--");
+            p = oled_append(p, " V");
+            *p = '\0';
+            break;
+        default:
+            if (!missing && control_mode == oled_shown_mode &&
+                ref_centivolts == oled_shown_ref_centivolts) { continue; }
+            p = oled_append(line, control_mode == CONTROL_MANUAL ? "MANUAL" : "UART");
+            p = oled_append(p, " REF ");
+            p = oled_reference_mv ? oled_volts(p, ref_centivolts) : oled_append(p, "--.--");
+            *p++ = 'V';
+            *p = '\0';
+            break;
+        }
+        if (!oled_text((uint8_t)(row * 2U), line)) { return false; }
+        if (row == 0U) {
+            oled_shown_shape = config.shape;
+            oled_shown_running = running;
+        } else if (row == 1U) {
+            oled_shown_frequency = timing.actual_millihz;
+        } else if (row == 2U) {
+            oled_shown_peak_centivolts = peak_centivolts;
+            oled_shown_amp_ref_centivolts = ref_centivolts;
+        } else {
+            oled_shown_mode = control_mode;
+            oled_shown_ref_centivolts = ref_centivolts;
+        }
+        oled_drawn_pages |= (uint8_t)(1U << row);
+        oled_next_page = (uint8_t)((row + 1U) & 3U);
+        return true;
+    }
+    return true;
+}
+
+static void oled_poll(void)
+{
+    if (!oled_ready) { return; }
+    const uint32_t now = DWT->CYCCNT;
+    if ((uint32_t)(now - oled_reference_cycles) >=
+        (SystemCoreClock / 1000000U) * OLED_REFERENCE_US) {
+        oled_reference_cycles = now;
+        const uint32_t measured = oled_measure_reference();
+        if (measured != 0U) { oled_reference_mv = measured; }
+    }
+    if ((uint32_t)(now - oled_refresh_cycles) <
+        (SystemCoreClock / 1000000U) * OLED_REFRESH_US) { return; }
+    oled_refresh_cycles = now;
+    const uint32_t peak_mv = (oled_reference_mv * config.amplitude_percent + 50U) / 100U;
+    const uint32_t peak_cv = (peak_mv + 5U) / 10U;
+    const uint32_t ref_cv = (oled_reference_mv + 5U) / 10U;
+    if (!oled_render(peak_cv, ref_cv, output_running())) {
+        oled_ready = false; /* An absent OLED must never stop waveform generation. */
+        uart_puts("\r\nWARN OLED update failed; waveform continues.\r\n> ");
+    }
 }
 
 static void print_status(void)
@@ -374,6 +667,8 @@ int main(void)
     if (!pot_ready) { uart_puts("ERR potentiometer ADC unavailable.\r\n"); }
     (void)wave_timing(SystemCoreClock, config.frequency_millihz, &timing);
     set_control_mode(mode_switch.stable ? CONTROL_MANUAL : CONTROL_UART, false);
+    oled_ready = oled_init();
+    if (!oled_ready) { uart_puts("WARN OLED not detected at I2C address 0x3C or 0x3D.\r\n"); }
     uart_puts("Output stopped. Press B1 to start; PA1 open/VDD=manual, PA1 to GND=UART.\r\n");
     print_status();
     uart_puts("> ");
@@ -394,6 +689,7 @@ int main(void)
             handle_button_press();
         }
         poll_pot();
+        oled_poll();
         const int byte = uart_getc();
         if (byte == -1) { continue; }
         if (byte == -2) {
