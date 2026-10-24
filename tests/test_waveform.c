@@ -94,6 +94,19 @@ static void test_pot_frequency(void)
     assert(wave_pot_frequency(2048U) < 1000000U);
 }
 
+static void test_pot_amplitude(void)
+{
+    uint32_t previous = wave_pot_amplitude(0U);
+    assert(previous == 0U);
+    for (uint16_t code = 1U; code < 4096U; ++code) {
+        const uint32_t amplitude = wave_pot_amplitude(code);
+        assert(amplitude >= previous && amplitude <= 100U);
+        previous = amplitude;
+    }
+    assert(wave_pot_amplitude(2048U) == 50U);
+    assert(previous == 100U);
+}
+
 static void test_shapes(void)
 {
     uint32_t table[WAVE_MAX_SAMPLES];
@@ -112,8 +125,9 @@ static void test_shapes(void)
                     if (s == WAVE_SAW_UP && i) { assert(table[i] >= table[i-1]); }
                     if (s == WAVE_SAW_DOWN && i) { assert(table[i] <= table[i-1]); }
                 }
-                assert(fabs((double)(hi - lo) - 4095.0 * amp / 100.0) <= 1.01);
-                if (!amp) { assert(lo == 2048U && hi == 2048U); }
+                assert(lo == 0U);
+                assert(fabs((double)hi - 4095.0 * amp / 100.0) <= 1.01);
+                if (!amp) { assert(hi == 0U); }
                 if (amp == 100U) { assert(lo == 0U && hi == 4095U); }
                 if (s == WAVE_SQUARE) {
                     for (unsigned i = 0; i < n; ++i) { assert(table[i] == (i < n/2U ? hi : lo)); }
@@ -131,7 +145,7 @@ static void test_shapes(void)
 
 int main(void)
 {
-    test_commands(); test_timing(); test_pot_frequency(); test_shapes();
+    test_commands(); test_timing(); test_pot_frequency(); test_pot_amplitude(); test_shapes();
     puts("PASS: command validation, timer limits/accuracy, pot mapping, waveform shape/amplitude");
     return 0;
 }

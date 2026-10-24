@@ -79,6 +79,7 @@ void _fini(void) {}
 static wave_config_t config = {WAVE_SINE, 120000U, 80U};
 static wave_timing_t timing;
 static uint32_t uart_frequency_millihz = 120000U;
+static uint32_t uart_amplitude_percent = 80U;
 
 typedef enum { CONTROL_UNSET, CONTROL_UART, CONTROL_MANUAL } control_mode_t;
 static control_mode_t control_mode = CONTROL_UNSET;
@@ -93,7 +94,7 @@ typedef struct {
 } button_t;
 static button_t shape_button, mode_switch;
 static bool pot_ready;
-static uint16_t applied_pot_code;
+static uint16_t applied_frequency_code, applied_amplitude_code;
 static bool applied_pot_valid, pot_fault_reported;
 static uint32_t last_pot_cycles;
 
@@ -138,10 +139,12 @@ static bool button_pressed_event(button_t *button, bool sample)
 
 static bool pot_init(void)
 {
-    RCC->AHB2ENR |= RCC_AHB2ENR_ADC12EN;
+    RCC->AHB2ENR |= RCC_AHB2ENR_GPIOBEN | RCC_AHB2ENR_ADC12EN;
     (void)RCC->AHB2ENR;
     GPIOA->MODER |= GPIO_MODER_MODE0; /* PA0: analog input, ADC1 channel 1. */
     GPIOA->PUPDR &= ~GPIO_PUPDR_PUPD0;
+    GPIOB->MODER |= GPIO_MODER_MODE0; /* PB0: analog input, ADC1 channel 15. */
+    GPIOB->PUPDR &= ~GPIO_PUPDR_PUPD0;
     /* Synchronous HCLK/4 keeps the ADC clock within its limit at 144 MHz. */
     ADC12_COMMON->CCR = (ADC12_COMMON->CCR & ~(ADC_CCR_CKMODE | ADC_CCR_PRESC)) |
                         ADC_CCR_CKMODE_0 | ADC_CCR_CKMODE_1;
@@ -151,7 +154,8 @@ static bool pot_init(void)
     ADC1->CFGR = 0U; /* One software-triggered, right-aligned 12-bit conversion. */
     ADC1->SQR1 = ADC_SQR1_SQ1_0;
     ADC1->SMPR1 = (ADC1->SMPR1 & ~ADC_SMPR1_SMP1) | ADC_SMPR1_SMP1;
-    ADC1->DIFSEL &= ~(1U << 1); /* Channel 1 is single-ended. */
+    ADC1->SMPR2 = (ADC1->SMPR2 & ~ADC_SMPR2_SMP15) | ADC_SMPR2_SMP15;
+    ADC1->DIFSEL &= ~((1U << 1) | (1U << 15)); /* Both channels are single-ended. */
     ADC1->CR &= ~ADC_CR_ADCALDIF;
     ADC1->CR |= ADC_CR_ADCAL;
     if (!board_wait(&ADC1->CR, ADC_CR_ADCAL, 0U, 10000U)) { return false; }
@@ -161,8 +165,11 @@ static bool pot_init(void)
     return board_wait(&ADC1->ISR, ADC_ISR_ADRDY, ADC_ISR_ADRDY, 1000U);
 }
 
-static bool pot_read(uint16_t *code)
+static bool pot_read(uint32_t channel, uint16_t *code)
 {
+    /* SQR1 may change only between regular conversions (ADSTART clear). */
+    if (!board_wait(&ADC1->CR, ADC_CR_ADSTART, 0U, 1000U)) { return false; }
+    ADC1->SQR1 = channel << ADC_SQR1_SQ1_Pos;
     uint32_t sum = 0U;
     for (unsigned i = 0U; i < 4U; ++i) {
         ADC1->ISR = ADC_ISR_EOC | ADC_ISR_EOS;
@@ -174,6 +181,11 @@ static bool pot_read(uint16_t *code)
     return true;
 }
 
+static bool manual_controls_read(uint16_t *frequency_code, uint16_t *amplitude_code)
+{
+    return pot_read(1U, frequency_code) && pot_read(15U, amplitude_code);
+}
+
 static void print_status(void)
 {
     uart_puts(output_running() ? "RUN " : "STOP ");
@@ -182,7 +194,7 @@ static void print_status(void)
     uart_puts(" requested="); uart_millihz(config.frequency_millihz);
     uart_puts(" Hz timer="); uart_millihz(timing.actual_millihz);
     uart_puts(" Hz amp="); uart_uint(config.amplitude_percent);
-    uart_puts("% VREF+ p-p, offset=50% VREF+, samples="); uart_uint(timing.samples);
+    uart_puts("% VREF+ peak from 0 V, samples="); uart_uint(timing.samples);
     uart_puts(" fs="); uart_uint(timing.sample_hz);
     uart_puts(" Hz clock="); uart_uint(SystemCoreClock);
     uart_puts(board_uses_hse() ? " Hz HSE\r\n" : " Hz HSI (RC accuracy)\r\n");
@@ -201,17 +213,19 @@ static void print_help(void)
         "Hz: 0.1..10000, up to 3 decimals. Example: sin 120\r\n"
         "Wave commands start output. freq/amp keep RUN/STOP state.\r\n"
         "B1 USER starts the selected wave, then cycles shapes on each press.\r\n"
-        "PA1 open or VDD=manual (PA0 pot: 10..10000 Hz).\r\n"
-        "PA1 to GND=UART; freq and wave commands require PA1 low.\r\n"
-        "Amplitude is % of VREF+ peak-to-peak, centered at VREF+/2.\r\n"
+        "PA1 open or VDD=manual (PA0: 10..10000 Hz; PB0: 0..100% amp).\r\n"
+        "PA1 to GND=UART; freq, amp and wave commands require PA1 low.\r\n"
+        "Amplitude sets the peak above 0 V, as % of VREF+.\r\n"
         "PA4 DAC output. 115200 8N1. Enable terminal local echo.\r\n");
 }
 
-static bool select_frequency(uint32_t frequency_millihz)
+static bool select_controls(uint32_t frequency_millihz, uint32_t amplitude_percent)
 {
-    if (frequency_millihz == config.frequency_millihz) { return true; }
+    if (frequency_millihz == config.frequency_millihz &&
+        amplitude_percent == config.amplitude_percent) { return true; }
     wave_config_t next = config;
     next.frequency_millihz = frequency_millihz;
+    next.amplitude_percent = amplitude_percent;
     wave_timing_t next_timing;
     if (!wave_timing(SystemCoreClock, frequency_millihz, &next_timing)) { return false; }
     if (output_running() && !output_start(&next, &next_timing)) { return false; }
@@ -225,12 +239,14 @@ static void set_control_mode(control_mode_t next, bool announce)
     if (next == control_mode) { return; }
     control_mode = next; /* The physical PA1 level determines the mode. */
     if (next == CONTROL_MANUAL) {
-        uint16_t code;
+        uint16_t frequency_code, amplitude_code;
         applied_pot_valid = false;
         last_pot_cycles = DWT->CYCCNT;
-        if (pot_ready && pot_read(&code)) {
-            if (select_frequency(wave_pot_frequency(code))) {
-                applied_pot_code = code;
+        if (pot_ready && manual_controls_read(&frequency_code, &amplitude_code)) {
+            if (select_controls(wave_pot_frequency(frequency_code),
+                                wave_pot_amplitude(amplitude_code))) {
+                applied_frequency_code = frequency_code;
+                applied_amplitude_code = amplitude_code;
                 applied_pot_valid = true;
             } else { uart_puts("\r\nERR timer configuration\r\n"); }
         } else if (pot_ready) {
@@ -238,7 +254,7 @@ static void set_control_mode(control_mode_t next, bool announce)
             pot_fault_reported = true;
         }
     } else {
-        if (!select_frequency(uart_frequency_millihz)) {
+        if (!select_controls(uart_frequency_millihz, uart_amplitude_percent)) {
             uart_puts("\r\nERR timer configuration\r\n");
         }
     }
@@ -256,8 +272,8 @@ static void poll_pot(void)
     if ((uint32_t)(now - last_pot_cycles) <
         (SystemCoreClock / 1000000U) * POT_POLL_US) { return; }
     last_pot_cycles = now;
-    uint16_t code;
-    if (!pot_read(&code)) {
+    uint16_t frequency_code, amplitude_code;
+    if (!manual_controls_read(&frequency_code, &amplitude_code)) {
         applied_pot_valid = false;
         if (!pot_fault_reported) {
             uart_puts("\r\nERR potentiometer ADC read failed; manual mode retained\r\n> ");
@@ -266,11 +282,17 @@ static void poll_pot(void)
         return;
     }
     pot_fault_reported = false;
-    const uint16_t difference = (code > applied_pot_code) ?
-                                (code - applied_pot_code) : (applied_pot_code - code);
-    if ((!applied_pot_valid || difference >= POT_CHANGE_CODES) &&
-        select_frequency(wave_pot_frequency(code))) {
-        applied_pot_code = code;
+    const uint16_t frequency_difference = (frequency_code > applied_frequency_code) ?
+        (frequency_code - applied_frequency_code) : (applied_frequency_code - frequency_code);
+    const uint16_t amplitude_difference = (amplitude_code > applied_amplitude_code) ?
+        (amplitude_code - applied_amplitude_code) : (applied_amplitude_code - amplitude_code);
+    const bool update_frequency = !applied_pot_valid || frequency_difference >= POT_CHANGE_CODES;
+    const bool update_amplitude = !applied_pot_valid || amplitude_difference >= POT_CHANGE_CODES;
+    if ((update_frequency || update_amplitude) &&
+        select_controls(update_frequency ? wave_pot_frequency(frequency_code) : config.frequency_millihz,
+                        update_amplitude ? wave_pot_amplitude(amplitude_code) : config.amplitude_percent)) {
+        if (update_frequency) { applied_frequency_code = frequency_code; }
+        if (update_amplitude) { applied_amplitude_code = amplitude_code; }
         applied_pot_valid = true;
     }
 }
@@ -298,8 +320,9 @@ static void execute(char *line)
     /* Parse into a copy so bad input cannot change the active waveform. */
     const command_t command = command_parse(line, &config);
     if (control_mode == CONTROL_MANUAL &&
-        (command.kind == COMMAND_FREQUENCY || command.kind == COMMAND_WAVE)) {
-        uart_puts("ERR frequency is set by PA0; connect PA1 to GND for UART mode.\r\n");
+        (command.kind == COMMAND_FREQUENCY || command.kind == COMMAND_AMPLITUDE ||
+         command.kind == COMMAND_WAVE)) {
+        uart_puts("ERR frequency and amplitude are set by PA0/PB0; connect PA1 to GND for UART mode.\r\n");
         return;
     }
     switch (command.kind) {
@@ -326,6 +349,9 @@ static void execute(char *line)
         timing = next_timing;
         if (command.kind == COMMAND_FREQUENCY || command.kind == COMMAND_WAVE) {
             uart_frequency_millihz = config.frequency_millihz;
+        }
+        if (command.kind == COMMAND_AMPLITUDE || command.kind == COMMAND_WAVE) {
+            uart_amplitude_percent = config.amplitude_percent;
         }
         break;
     }

@@ -42,7 +42,7 @@ bool wave_timing(uint32_t timer_hz, uint32_t frequency_millihz, wave_timing_t *t
 
 void wave_fill(uint32_t *buffer, uint16_t count, const wave_config_t *config)
 {
-    const float amplitude = 2047.5f * (float)config->amplitude_percent / 100.0f;
+    const float peak = 4095.0f * (float)config->amplitude_percent / 100.0f;
     for (uint16_t i = 0; i < count; ++i) {
         const float phase = (float)i / (float)count;
         float normalized;
@@ -63,7 +63,8 @@ void wave_fill(uint32_t *buffer, uint16_t count, const wave_config_t *config)
             normalized = sinf(6.283185307179586f * phase);
             break;
         }
-        float code = 2047.5f + amplitude * normalized;
+        /* Scale each shape from DAC code zero up to the requested peak. */
+        float code = 0.5f * peak * (normalized + 1.0f);
         if (code < 0.0f) { code = 0.0f; }
         if (code > 4095.0f) { code = 4095.0f; }
         buffer[i] = (uint32_t)(code + 0.5f);
@@ -86,6 +87,13 @@ uint32_t wave_pot_frequency(uint16_t adc_code)
     const uint32_t fraction = scaled % 4095U;
     const uint64_t span = (uint64_t)limits[decade + 1U] - limits[decade];
     return limits[decade] + (uint32_t)((span * fraction + 2047U) / 4095U);
+}
+
+uint32_t wave_pot_amplitude(uint16_t adc_code)
+{
+    /* Round the 12-bit knob position to a 0..100% DAC peak. */
+    if (adc_code >= 4095U) { return 100U; }
+    return ((uint32_t)adc_code * 100U + 2047U) / 4095U;
 }
 
 /* Hardware output is excluded from the host-only waveform tests. */
