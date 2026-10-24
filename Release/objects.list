@@ -1,8 +1,4 @@
-"./Core/Src/board.o"
-"./Core/Src/command.o"
 "./Core/Src/main.o"
-"./Core/Src/output.o"
-"./Core/Src/runtime.o"
 "./Core/Src/system_stm32g4xx.o"
 "./Core/Src/uart.o"
 "./Core/Src/waveform.o"

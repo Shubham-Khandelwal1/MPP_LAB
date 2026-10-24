@@ -1,3 +1,12 @@
+../Core/Src/waveform.c:102:13:disarm	2
 ../Core/Src/waveform.c:4:6:wave_timing	7
 ../Core/Src/waveform.c:43:6:wave_fill	8
 ../Core/Src/waveform.c:73:13:wave_name	2
+../Core/Src/waveform.c:79:10:wave_pot_frequency	2
+../Core/Src/waveform.c:111:6:output_stop	1
+../Core/Src/waveform.c:119:6:output_init	2
+../Core/Src/waveform.c:147:6:output_start	2
+../Core/Src/waveform.c:179:6:output_running	1
+../Core/Src/waveform.c:180:10:output_take_fault	1
+../Core/Src/waveform.c:189:6:DMA1_Channel1_IRQHandler	2
+../Core/Src/waveform.c:194:6:TIM6_DAC_IRQHandler	2

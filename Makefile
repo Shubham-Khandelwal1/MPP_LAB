@@ -38,9 +38,9 @@ $(TARGET).hex: $(TARGET).elf
 test: $(BUILD_DIR)/test_waveform
 	./$(BUILD_DIR)/test_waveform
 
-$(BUILD_DIR)/test_waveform: tests/test_waveform.c Core/Src/waveform.c Core/Src/command.c Core/Inc/waveform.h Core/Inc/command.h
+$(BUILD_DIR)/test_waveform: tests/test_waveform.c Core/Src/waveform.c Core/Src/uart.c Core/Inc/waveform.h Core/Inc/uart.h
 	@mkdir -p $(@D)
-	$(HOST_CC) -std=c11 -O2 -g -Wall -Wextra -Werror -ICore/Inc tests/test_waveform.c Core/Src/waveform.c Core/Src/command.c -lm -o $@
+	$(HOST_CC) -std=c11 -O2 -g -Wall -Wextra -Werror -ICore/Inc tests/test_waveform.c Core/Src/waveform.c Core/Src/uart.c -lm -o $@
 
 clean:
 	$(RM) $(OBJECTS) $(OBJECTS:.o=.d) $(TARGET).elf $(TARGET).bin $(TARGET).hex $(TARGET).map $(BUILD_DIR)/test_waveform

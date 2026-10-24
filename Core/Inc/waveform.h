@@ -30,5 +30,13 @@ typedef struct {
 bool wave_timing(uint32_t timer_hz, uint32_t frequency_millihz, wave_timing_t *timing);
 void wave_fill(uint32_t *buffer, uint16_t count, const wave_config_t *config);
 const char *wave_name(wave_shape_t shape);
+uint32_t wave_pot_frequency(uint16_t adc_code);
+
+/* DAC output driven by TIM6 and circular DMA. */
+bool output_init(void);
+bool output_start(const wave_config_t *config, wave_timing_t *timing);
+void output_stop(void);
+bool output_running(void);
+uint32_t output_take_fault(void);
 
 #endif

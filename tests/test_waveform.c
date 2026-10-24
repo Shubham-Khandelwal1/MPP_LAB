@@ -1,4 +1,4 @@
-#include "command.h"
+#include "uart.h"
 #include <assert.h>
 #include <math.h>
 #include <stdio.h>
@@ -77,6 +77,23 @@ static void test_timing(void)
     printf("Timer sweep: 19,999,802 cases; worst 144 MHz error %.5f%%\n", worst_error * 100.0);
 }
 
+static void test_pot_frequency(void)
+{
+    uint32_t previous = wave_pot_frequency(0U);
+    assert(previous == 10000U); /* 10 Hz. UART still supports 0.1 Hz. */
+    for (uint16_t code = 1U; code < 4096U; ++code) {
+        const uint32_t frequency = wave_pot_frequency(code);
+        assert(frequency >= previous && frequency >= 10000U &&
+               frequency <= WAVE_MAX_MILLIHZ);
+        previous = frequency;
+    }
+    assert(previous == WAVE_MAX_MILLIHZ);
+    assert(wave_pot_frequency(1365U) == 100000U); /* 100 Hz boundary. */
+    assert(wave_pot_frequency(2730U) == 1000000U); /* 1 kHz boundary. */
+    assert(wave_pot_frequency(2048U) > 100000U);
+    assert(wave_pot_frequency(2048U) < 1000000U);
+}
+
 static void test_shapes(void)
 {
     uint32_t table[WAVE_MAX_SAMPLES];
@@ -114,7 +131,7 @@ static void test_shapes(void)
 
 int main(void)
 {
-    test_commands(); test_timing(); test_shapes();
-    puts("PASS: command validation, timer limits/accuracy, waveform shape/amplitude");
+    test_commands(); test_timing(); test_pot_frequency(); test_shapes();
+    puts("PASS: command validation, timer limits/accuracy, pot mapping, waveform shape/amplitude");
     return 0;
 }
