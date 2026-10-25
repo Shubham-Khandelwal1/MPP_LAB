@@ -86,6 +86,7 @@ typedef enum { CONTROL_UNSET, CONTROL_UART, CONTROL_MANUAL } control_mode_t;
 static control_mode_t control_mode = CONTROL_UNSET;
 
 #define USER_BUTTON_DEBOUNCE_US 20000U
+#define USER_BUTTON_STOP_US 2000000U
 #define POT_POLL_US 50000U
 #define POT_CHANGE_CODES 4U
 typedef struct {
@@ -94,6 +95,8 @@ typedef struct {
     uint32_t changed_at;
 } button_t;
 static button_t shape_button, mode_switch;
+static uint32_t shape_press_started;
+static bool shape_long_press_handled;
 static bool pot_ready;
 static uint16_t applied_frequency_code, applied_amplitude_code;
 static bool applied_pot_valid, pot_fault_reported;
@@ -114,6 +117,7 @@ static void button_init(void)
     shape_button.sample = shape_button.stable = (GPIOC->IDR & GPIO_IDR_ID13) != 0U;
     mode_switch.sample = mode_switch.stable = (GPIOA->IDR & GPIO_IDR_ID1) != 0U;
     shape_button.changed_at = mode_switch.changed_at = DWT->CYCCNT;
+    shape_press_started = shape_button.changed_at;
 }
 
 static bool button_level_changed(button_t *button, bool sample)
@@ -131,11 +135,6 @@ static bool button_level_changed(button_t *button, bool sample)
         return true;
     }
     return false;
-}
-
-static bool button_pressed_event(button_t *button, bool sample)
-{
-    return button_level_changed(button, sample) && button->stable;
 }
 
 static bool pot_init(void)
@@ -505,7 +504,7 @@ static void print_help(void)
         "start|on   stop|off   status   help|?\r\n"
         "Hz: 0.1..10000, up to 3 decimals. Example: sin 120\r\n"
         "Wave commands start output. freq/amp keep RUN/STOP state.\r\n"
-        "B1 USER starts the selected wave, then cycles shapes on each press.\r\n"
+        "B1 short press starts/cycles waves; hold 2 s for emergency stop.\r\n"
         "PA1 open or VDD=manual (PA0: 10..10000 Hz; PB0: 0..100% amp).\r\n"
         "PA1 to GND=UART; freq, amp and wave commands require PA1 low.\r\n"
         "Amplitude sets the peak above 0 V, as % of VREF+.\r\n"
@@ -608,6 +607,40 @@ static void handle_button_press(void)
     uart_puts("> ");
 }
 
+static void handle_emergency_stop(void)
+{
+    output_stop();
+    uart_puts("\r\nEMERGENCY STOP ");
+    print_status();
+    uart_puts("> ");
+}
+
+static void poll_shape_button(void)
+{
+    const bool pressed = (GPIOC->IDR & GPIO_IDR_ID13) != 0U;
+    if (button_level_changed(&shape_button, pressed)) {
+        if (shape_button.stable) {
+            /* Use the raw edge time so the 20 ms debounce does not lengthen
+               the required hold or turn a just-short press into a stop. */
+            shape_press_started = shape_button.changed_at;
+            shape_long_press_handled = false;
+        } else if (!shape_long_press_handled) {
+            const uint32_t held_cycles = shape_button.changed_at - shape_press_started;
+            if (held_cycles >= (SystemCoreClock / 1000000U) * USER_BUTTON_STOP_US) {
+                handle_emergency_stop();
+            } else {
+                handle_button_press(); /* Short press acts on release. */
+            }
+        }
+    }
+    if (shape_button.stable && pressed && !shape_long_press_handled &&
+        (uint32_t)(DWT->CYCCNT - shape_press_started) >=
+        (SystemCoreClock / 1000000U) * USER_BUTTON_STOP_US) {
+        shape_long_press_handled = true;
+        handle_emergency_stop();
+    }
+}
+
 static void execute(char *line)
 {
     /* Parse into a copy so bad input cannot change the active waveform. */
@@ -669,7 +702,7 @@ int main(void)
     set_control_mode(mode_switch.stable ? CONTROL_MANUAL : CONTROL_UART, false);
     oled_ready = oled_init();
     if (!oled_ready) { uart_puts("WARN OLED not detected at I2C address 0x3C or 0x3D.\r\n"); }
-    uart_puts("Output stopped. Press B1 to start; PA1 open/VDD=manual, PA1 to GND=UART.\r\n");
+    uart_puts("Output stopped. Tap B1 to start/cycle; hold 2 s to stop. PA1 open/VDD=manual, PA1 to GND=UART.\r\n");
     print_status();
     uart_puts("> ");
     char line[96];
@@ -682,11 +715,9 @@ int main(void)
             uart_puts((fault & 1U) ? "DMA transfer error" : "DAC DMA underrun");
             uart_puts(". Type start to retry.\r\n> ");
         }
+        poll_shape_button();
         if (button_level_changed(&mode_switch, (GPIOA->IDR & GPIO_IDR_ID1) != 0U)) {
             set_control_mode(mode_switch.stable ? CONTROL_MANUAL : CONTROL_UART, true);
-        }
-        if (button_pressed_event(&shape_button, (GPIOC->IDR & GPIO_IDR_ID13) != 0U)) {
-            handle_button_press();
         }
         poll_pot();
         oled_poll();
